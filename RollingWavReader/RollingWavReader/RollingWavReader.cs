@@ -14,10 +14,9 @@ namespace VoicePrint
         public int SampleBitWidth { get; set; }
         public long[][] Samples { get; set; }
         public List<double[]> Features { get; set; }
-        public List<Tuple<int, int, int, int>> OngoingMFCCs { get; set; }
-        public List<bool> AreMFCCsOngoing { get; set; }
-        public int UsedSampleLength { get; set; }
-        public long NumSamples { get; set; }
+        public List<Tuple<int, int, int, int>> ExtractionReservedIndexes { get; set; }
+        public List<bool> AreExtractionsOngoing { get; set; }
+        public int TotalSamples { get; set; }
         private IRandomAccessStream _Source { get; set; }
         private ulong Position { get; set; }
         private ulong DataChunkPosition { get; set; }
@@ -27,9 +26,9 @@ namespace VoicePrint
         {
             _Source = source;
             Position = 0;
-            OngoingMFCCs = new List<Tuple<int, int, int, int>>();
+            ExtractionReservedIndexes = new List<Tuple<int, int, int, int>>();
             Features = new List<double[]>();
-            AreMFCCsOngoing = new List<bool>();
+            AreExtractionsOngoing = new List<bool>();
         }
 
         public async Task Update()
@@ -46,7 +45,7 @@ namespace VoicePrint
                     {
                         Samples[c] = new long[4800];
                     }
-                    UsedSampleLength = 0;
+                    TotalSamples = 0;
                 }
             }
             if (ReadingData)
@@ -65,14 +64,14 @@ namespace VoicePrint
         private async Task ParseRollingData(IRandomAccessStream source)
         {
             var bytesLeft = source.Size - Position;
-            var offsetSample = UsedSampleLength;
+            var offsetSample = TotalSamples;
 
             var bytesPerSample = (ulong)SampleBitWidth / 8;
             var samplesToParse = bytesLeft / (bytesPerSample * (ulong)Channels);
 
-            UsedSampleLength += (int)samplesToParse;
+            TotalSamples += (int)samplesToParse;
 
-            if (Samples[0].Length < UsedSampleLength + (int)samplesToParse)
+            if (Samples[0].Length < TotalSamples + (int)samplesToParse)
             {
                 for (var c = 0; c < Channels; c++)
                 {
@@ -121,7 +120,7 @@ namespace VoicePrint
             await Update();
             for (var c = 0; c < Channels; c++)
             {
-                Array.Resize(ref Samples[c], UsedSampleLength); //Throw in an extra second for kicks
+                Array.Resize(ref Samples[c], TotalSamples); //Throw in an extra second for kicks
             }
         }
 
@@ -162,7 +161,7 @@ namespace VoicePrint
 
         private int NumWindows(int startSample, int maxNumSamples, int windowWidth, int windowOffset)
         {
-            var numWindows = (int)Math.Floor((double)(UsedSampleLength - startSample) / (double)windowOffset);
+            var numWindows = (int)Math.Floor((double)(TotalSamples - startSample) / (double)windowOffset);
             var endSample = startSample + (numWindows * windowOffset) + (windowWidth - windowOffset); //TODO: Ensure endSample < UsedSampleLength
             if ((endSample - startSample) < maxNumSamples)
             {
@@ -192,28 +191,29 @@ namespace VoicePrint
             }
         }
 
-        public void FilterAndMFCCRollingSamples(int windowWidthMs, int windowOffsetMs, bool finishing = false,
-            int thresholdAmplitude = 250, double thresholdOfSample = 0.3, int numFilters = 26, int numFeatures = 13,
-            int channel = 0, bool keepOrder = false)
+        public void FilterAndExtractRollingSamples(int windowWidthMs, int windowOffsetMs,
+            Func<double[], int, int, double[]> featureExtractor,
+            bool finishing = false, int thresholdAmplitude = 250, double thresholdOfSample = 0.3, int numFilters = 26,
+            int numFeatures = 13, int channel = 0, bool keepOrder = false)
         {
             if (keepOrder) throw new NotImplementedException();
 
             var windowWidth = windowWidthMs * (SampleRate / 1000); //(in samples)
             var windowOffset = windowOffsetMs * (SampleRate / 1000); //(in samples)
 
-            if (!ReadingData || UsedSampleLength < windowWidth) return;
+            if (!ReadingData || TotalSamples < windowWidth) return;
 
-            var startSample = OngoingMFCCs.Any() ? OngoingMFCCs.Max(a => a.Item2) : 0; //Get the highest sample that another one has ended on
-            var startFeatureIndex = OngoingMFCCs.Any() ? OngoingMFCCs.Max(a => a.Item4) : 0;
-            var maxNumSamples = UsedSampleLength - startSample;
+            var startSample = ExtractionReservedIndexes.Any() ? ExtractionReservedIndexes.Max(a => a.Item2) : 0; //Get the highest sample that another one has ended on
+            var startFeatureIndex = ExtractionReservedIndexes.Any() ? ExtractionReservedIndexes.Max(a => a.Item4) : 0;
+            var maxNumSamples = TotalSamples - startSample;
             var numWindows = NumWindows(startSample, maxNumSamples, windowWidth, windowOffset);
             if (numWindows == -1) return;
             var endSample = startSample + (numWindows * windowOffset) + (windowWidth - windowOffset);
             var endFeatureIndex = startFeatureIndex + numWindows;
 
             var thisTuple = new Tuple<int, int, int, int>(startSample, endSample, startFeatureIndex, endFeatureIndex);
-            OngoingMFCCs.Add(thisTuple);
-            AreMFCCsOngoing.Insert(OngoingMFCCs.IndexOf(thisTuple), true);
+            ExtractionReservedIndexes.Add(thisTuple);
+            AreExtractionsOngoing.Insert(ExtractionReservedIndexes.IndexOf(thisTuple), true);
 
             var samples = Samples[0];
 
@@ -226,7 +226,7 @@ namespace VoicePrint
                 {
                     var windowSamples = samples.Skip(startSample + ((int)window * windowOffset)).Take(windowWidth).Select(amplitude => (double)amplitude).ToArray();
                     if (windowSamples.Count(sample => Math.Abs(sample) < thresholdAmplitude) > (windowSamples.Length * thresholdOfSample)) return;
-                    features[window] = MFCC.compute(windowSamples, numFilters, numFeatures);
+                    features[window] = featureExtractor.Invoke(windowSamples, numFilters, numFeatures);
                 }
                 catch
                 {
@@ -241,15 +241,16 @@ namespace VoicePrint
             }
 
             Features.InsertRange(startFeatureIndex, features);
-            AreMFCCsOngoing[OngoingMFCCs.IndexOf(thisTuple)] = false;
+            AreExtractionsOngoing[ExtractionReservedIndexes.IndexOf(thisTuple)] = false;
         }
 
-        public async Task<double[][]> FinishMFCCSamples(int windowWidthMs, int windowOffsetMs)
+        public async Task<double[][]> FinishMFCCSamples(int windowWidthMs, int windowOffsetMs,
+            Func<double[], int, int, double[]> featureExtractor, int checkingDelayMs = 250)
         {
-            FilterAndMFCCRollingSamples(windowWidthMs, windowOffsetMs, true);
-            while (AreMFCCsOngoing.Any(b => b))
+            FilterAndExtractRollingSamples(windowWidthMs, windowOffsetMs, featureExtractor, true);
+            while (AreExtractionsOngoing.Any(b => b))
             {
-                await Task.Delay(TimeSpan.FromMilliseconds(250));
+                await Task.Delay(TimeSpan.FromMilliseconds(checkingDelayMs));
             }
             Features = Features.Where(feature => feature != null).ToList();
             return Features.ToArray();
