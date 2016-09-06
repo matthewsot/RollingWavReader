@@ -9,19 +9,42 @@ namespace VoicePrint
 {
     class RollingWavReader
     {
+        /// <summary>
+        /// The number of channels in the source audio
+        /// </summary>
         public int Channels { get; set; }
+        /// <summary>
+        /// The sample rate (in samples/second) of the source audio
+        /// </summary>
         public int SampleRate { get; set; }
+        /// <summary>
+        /// The number of bits per channel per sample of the source audio
+        /// </summary>
         public int SampleBitWidth { get; set; }
+        /// <summary>
+        /// The samples extracted from the audio source. Note that this array will be longer than the actual number of samples extracted.
+        /// </summary>
         public long[][] Samples { get; set; }
-        public List<double[]> Features { get; set; }
-        public List<Tuple<int, int, int, int>> ExtractionReservedIndexes { get; set; }
-        public List<bool> AreExtractionsOngoing { get; set; }
+        /// <summary>
+        /// The total number of samples that have been extracted
+        /// </summary>
         public int TotalSamples { get; set; }
+        /// <summary>
+        /// The intermediate output of FilterAndExtractRollingSamples
+        /// </summary>
+        public List<double[]> Features { get; set; }
+
         private IRandomAccessStream _Source { get; set; }
         private ulong Position { get; set; }
         private ulong DataChunkPosition { get; set; }
         private bool ReadingData { get; set; }
+        private List<Tuple<int, int, int, int>> ExtractionReservedIndexes { get; set; }
+        private List<bool> AreExtractionsOngoing { get; set; }
 
+        /// <summary>
+        /// Initialize a new RollingWavReader from an IRandomAccessStream source
+        /// </summary>
+        /// <param name="source">The IRandomAccessStream to read WAV data from</param>
         public RollingWavReader(IRandomAccessStream source)
         {
             _Source = source;
@@ -29,8 +52,12 @@ namespace VoicePrint
             ExtractionReservedIndexes = new List<Tuple<int, int, int, int>>();
             Features = new List<double[]>();
             AreExtractionsOngoing = new List<bool>();
+            ReadingData = false;
         }
 
+        /// <summary>
+        /// Update the RollingWavReader with new samples from the source stream
+        /// </summary>
         public async Task Update()
         {
             var cloned = _Source.CloneStream();
@@ -54,6 +81,11 @@ namespace VoicePrint
             }
         }
 
+        /// <summary>
+        /// Parses the "fmt" chunk
+        /// </summary>
+        /// <param name="rawData">The raw byte array that contains the format chunk</param>
+        /// <param name="offset">The offset of the format chunk in the byte array</param>
         private void ParseFormatChunk(byte[] rawData, int offset)
         {
             Channels = BitConverter.ToInt16(rawData, offset + 10);
@@ -61,6 +93,11 @@ namespace VoicePrint
             SampleBitWidth = BitConverter.ToInt16(rawData, offset + 22);
         }
 
+        /// <summary>
+        /// Updates the Samples array with new data from the source stream. Assumes that data fills up to the end of the stream.
+        /// </summary>
+        /// <param name="source">The source stream to read the data from</param>
+        /// <returns></returns>
         private async Task ParseRollingData(IRandomAccessStream source)
         {
             var bytesLeft = source.Size - Position;
@@ -89,10 +126,7 @@ namespace VoicePrint
                     var sourceOffset = (int)((s * bytesPerSample * (ulong)Channels) + ((ulong)c * bytesPerSample));
                     if (sourceOffset >= rawData.Length) break;
                     var sampleIndex = offsetSample + (int)s;
-                    if (Samples[c][sampleIndex] != default(long))
-                    {
-                        var y = 1 + 1;
-                    }
+
                     switch (SampleBitWidth)
                     {
                         case 8:
@@ -115,6 +149,11 @@ namespace VoicePrint
             Position += samplesToParse * (ulong)Channels * bytesPerSample;
         }
 
+
+        /// <summary>
+        /// Updates the Samples array with any remaining data in the source stream and resizes the Samples array to fit the number of samples.
+        /// </summary>
+        /// <returns></returns>
         public async Task FinalizeData()
         {
             await Update();
@@ -124,6 +163,10 @@ namespace VoicePrint
             }
         }
 
+        /// <summary>
+        /// Parses the "fmt" and "data" headers
+        /// </summary>
+        /// <param name="source">The IRandomAccessStream source to parse from</param>
         private async void ParseHeaders(IRandomAccessStream source)
         {
             source.Seek(0);
@@ -159,6 +202,14 @@ namespace VoicePrint
 
         /* Optional portion of the library for applying feature extraction to the samples */
 
+        /// <summary>
+        /// Determines the number of windows that will fit in a given number of samples
+        /// </summary>
+        /// <param name="startSample">The sample index to start at</param>
+        /// <param name="maxNumSamples">The total number of samples that may be used</param>
+        /// <param name="windowWidth">The width of a single window (in samples)</param>
+        /// <param name="windowOffset">The offset between windows (in samples)</param>
+        /// <returns>The greatest whole number of windows that will fit between startSample and startSample + maxNumSamples</returns>
         private int NumWindows(int startSample, int maxNumSamples, int windowWidth, int windowOffset)
         {
             var numWindows = (int)Math.Floor((double)(TotalSamples - startSample) / (double)windowOffset);
@@ -187,17 +238,25 @@ namespace VoicePrint
             }
             else
             {
-                return -1;
+                return 0;
             }
         }
 
+        /// <summary>
+        /// Filters and applies a feature extraction function to a batch of rolling samples using the given parameters.
+        /// </summary>
+        /// <param name="windowWidthMs">The width of a single window (in milliseconds)</param>
+        /// <param name="windowOffsetMs">The offset between windows (in milliseconds)</param>
+        /// <param name="featureExtractor">The feature extraction function</param>
+        /// <param name="finishing">A value indicating whether this is the final feature extraction or not</param>
+        /// <param name="thresholdAmplitude">The threshold amplitude used to filter out noise</param>
+        /// <param name="thresholdOfSample">The proportion of samples in a single window that must be below thresholdAmplitude to cause the window to be discarded</param>
+        /// <param name="channel">The channel of audio to be sent to the feature extraction function</param>
         public void FilterAndExtractRollingSamples(int windowWidthMs, int windowOffsetMs,
-            Func<double[], int, int, double[]> featureExtractor,
-            bool finishing = false, int thresholdAmplitude = 250, double thresholdOfSample = 0.3, int numFilters = 26,
-            int numFeatures = 13, int channel = 0, bool keepOrder = false)
+            Func<double[], double[]> featureExtractor,
+            bool finishing = false, int thresholdAmplitude = 250, double thresholdOfSample = 0.3,
+            int channel = 0)
         {
-            if (keepOrder) throw new NotImplementedException();
-
             var windowWidth = windowWidthMs * (SampleRate / 1000); //(in samples)
             var windowOffset = windowOffsetMs * (SampleRate / 1000); //(in samples)
 
@@ -207,7 +266,7 @@ namespace VoicePrint
             var startFeatureIndex = ExtractionReservedIndexes.Any() ? ExtractionReservedIndexes.Max(a => a.Item4) : 0;
             var maxNumSamples = TotalSamples - startSample;
             var numWindows = NumWindows(startSample, maxNumSamples, windowWidth, windowOffset);
-            if (numWindows == -1) return;
+            if (numWindows == 0) return;
             var endSample = startSample + (numWindows * windowOffset) + (windowWidth - windowOffset);
             var endFeatureIndex = startFeatureIndex + numWindows;
 
@@ -226,7 +285,7 @@ namespace VoicePrint
                 {
                     var windowSamples = samples.Skip(startSample + ((int)window * windowOffset)).Take(windowWidth).Select(amplitude => (double)amplitude).ToArray();
                     if (windowSamples.Count(sample => Math.Abs(sample) < thresholdAmplitude) > (windowSamples.Length * thresholdOfSample)) return;
-                    features[window] = featureExtractor.Invoke(windowSamples, numFilters, numFeatures);
+                    features[window] = featureExtractor.Invoke(windowSamples);
                 }
                 catch
                 {
@@ -244,8 +303,16 @@ namespace VoicePrint
             AreExtractionsOngoing[ExtractionReservedIndexes.IndexOf(thisTuple)] = false;
         }
 
+        /// <summary>
+        /// Extracts all remaining features and ensures that feature extraction is complete before returning.
+        /// </summary>
+        /// <param name="windowWidthMs">The width of a single window (in milliseconds)</param>
+        /// <param name="windowOffsetMs">The offset between two windows (in milliseconds)</param>
+        /// <param name="featureExtractor">The feature extraction function to use</param>
+        /// <param name="checkingDelayMs">The delay to use while checking if feature extraction is complete</param>
+        /// <returns>The extracted feature array</returns>
         public async Task<double[][]> FinishMFCCSamples(int windowWidthMs, int windowOffsetMs,
-            Func<double[], int, int, double[]> featureExtractor, int checkingDelayMs = 250)
+            Func<double[], double[]> featureExtractor, int checkingDelayMs = 250)
         {
             FilterAndExtractRollingSamples(windowWidthMs, windowOffsetMs, featureExtractor, true);
             while (AreExtractionsOngoing.Any(b => b))
