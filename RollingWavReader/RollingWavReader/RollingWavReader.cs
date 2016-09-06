@@ -248,13 +248,11 @@ namespace VoicePrint
         /// <param name="windowWidthMs">The width of a single window (in milliseconds)</param>
         /// <param name="windowOffsetMs">The offset between windows (in milliseconds)</param>
         /// <param name="featureExtractor">The feature extraction function</param>
-        /// <param name="finishing">A value indicating whether this is the final feature extraction or not</param>
         /// <param name="thresholdAmplitude">The threshold amplitude used to filter out noise</param>
         /// <param name="thresholdOfSample">The proportion of samples in a single window that must be below thresholdAmplitude to cause the window to be discarded</param>
         /// <param name="channel">The channel of audio to be sent to the feature extraction function</param>
         public void FilterAndExtractRollingSamples(int windowWidthMs, int windowOffsetMs,
-            Func<double[], double[]> featureExtractor,
-            bool finishing = false, int thresholdAmplitude = 250, double thresholdOfSample = 0.3,
+            Func<double[], double[]> featureExtractor, int thresholdAmplitude = 250, double thresholdOfSample = 0.3,
             int channel = 0)
         {
             var windowWidth = windowWidthMs * (SampleRate / 1000); //(in samples)
@@ -314,7 +312,7 @@ namespace VoicePrint
         public async Task<double[][]> FinishMFCCSamples(int windowWidthMs, int windowOffsetMs,
             Func<double[], double[]> featureExtractor, int checkingDelayMs = 250)
         {
-            FilterAndExtractRollingSamples(windowWidthMs, windowOffsetMs, featureExtractor, true);
+            FilterAndExtractRollingSamples(windowWidthMs, windowOffsetMs, featureExtractor);
             while (AreExtractionsOngoing.Any(b => b))
             {
                 await Task.Delay(TimeSpan.FromMilliseconds(checkingDelayMs));
